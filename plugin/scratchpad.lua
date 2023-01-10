@@ -7,33 +7,45 @@ local utils = lazy.require("scratchpad.utils") ---@module "scratchpad.utils"
 local api = vim.api
 local fn = vim.fn
 
----@param arg_lead string
----@param items string[]
----@return string[]
-local function filter_completion(arg_lead, items)
-  arg_lead, _ = vim.pesc(arg_lead)
-  return vim.tbl_filter(function(item)
-    return item:match(arg_lead)
-  end, items)
-end
-
 local function completion(_, cmd_line, cur_pos)
-  local ctx = arg_parser.scan(cmd_line, { cur_pos = cur_pos })
+  local ctx = arg_parser.scan(cmd_line, { cur_pos = cur_pos, allow_ex_range = true })
   local cmd = ctx.args[1]
 
   if cmd and sp.completers[cmd] then
-    return filter_completion(ctx.arg_lead, sp.completers[cmd](ctx) or {})
+    return arg_parser.process_candidates(sp.completers[cmd](ctx) or {}, ctx)
   end
 end
 
 api.nvim_create_user_command("Float", function(ctx)
-  local argo = arg_parser.parse(ctx.fargs) --[[@as ArgObject ]]
+  local cmdline = arg_parser.scan(ctx.args)
+  local argo = arg_parser.parse(cmdline.args) --[[@as ArgObject ]]
+  local cur_info = sp.win_info(0) or {}
+  local do_toggle = argo:get_flag("toggle") --[[@as boolean ]]
+
+  -- Toggle from float to split
+  if do_toggle and cur_info.floating then
+    sp.remove_pad(cur_info.winid)
+    local layout = sp.get_layout_tree()
+    local leaf = sp.get_last_leaf(layout)
+
+    api.nvim_win_call(leaf.winid, function()
+      vim.cmd(string.format(
+        "rightbelow %s sp",
+        (not leaf.parent or leaf.parent.type == "row") and "vertical" or ""
+      ))
+      api.nvim_win_set_buf(0, api.nvim_win_get_buf(cur_info.winid))
+      api.nvim_win_close(cur_info.winid, false)
+    end)
+
+    return
+  end
+
   local viewport_width = vim.o.columns
   local viewport_height = vim.o.lines
   local c = vim.deepcopy(sp.default_float_config)
 
-  local cw = tonumber(argo:get_flag({ "w" })) or 100
-  local ch = tonumber(argo:get_flag({ "h" })) or 24
+  local cw = tonumber(argo:get_flag({ "w", "width" })) or 100
+  local ch = tonumber(argo:get_flag({ "h", "height" })) or 24
 
   if cw % 1 ~= 0 then cw = cw * viewport_width end
   if ch % 1 ~= 0 then ch = ch * viewport_height end
@@ -54,7 +66,11 @@ api.nvim_create_user_command("Float", function(ctx)
 
   local winid = api.nvim_open_win(0, true, c)
 
-  if winid > 0 and argo.args[1] then
+  if do_toggle then
+    -- Toggle from split to float. We already created the float: just close the
+    -- remaining split.
+    api.nvim_win_close(cur_info.winid, false)
+  elseif winid > 0 and argo.args[1] then
     api.nvim_win_call(winid, function ()
       vim.cmd("edit " .. fn.fnameescape(argo.args[1]))
     end)
@@ -65,12 +81,13 @@ end, {
 })
 
 api.nvim_create_user_command("FloatMove", function(ctx)
-  local winid = api.nvim_get_current_win()
-  local info = sp.win_get_info(winid)
-  if not info or not sp.is_float(winid) then return end
+  local cmdline = arg_parser.scan(ctx.args)
+  local info = sp.win_info(0)
 
-  local arg_x = ctx.fargs[1] or "+0"
-  local arg_y = ctx.fargs[2] or "+0"
+  if not info or not info.floating then return end
+
+  local arg_x = cmdline.args[1] or "+0"
+  local arg_y = cmdline.args[2] or "+0"
   local value_x = tonumber(arg_x) or 0
   local value_y = tonumber(arg_y) or 0
   local new_x, new_y
@@ -100,15 +117,16 @@ api.nvim_create_user_command("FloatMove", function(ctx)
     new_y = value_y
   end
 
-  sp.float_set_pos(winid, new_x, new_y)
+  sp.float_set_pos(info.winid, new_x, new_y)
 end, { nargs = "+", bar = true })
 
 api.nvim_create_user_command("Scratchpad", function(ctx)
-  local argo = arg_parser.parse(ctx.fargs) --[[@as ArgObject ]]
+  local cmdline = arg_parser.scan(ctx.args)
+  local argo = arg_parser.parse(cmdline.args) --[[@as ArgObject ]]
   local subcmd = argo.args[1]
 
-  if subcmd and sp.sub_commands.Scratchpad[subcmd] then
-    sp.sub_commands.Scratchpad[subcmd](ctx, argo)
+  if subcmd and sp.subcmds.Scratchpad[subcmd] then
+    sp.subcmds.Scratchpad[subcmd](cmdline, argo)
   end
 end, { nargs = "*", complete = completion })
 

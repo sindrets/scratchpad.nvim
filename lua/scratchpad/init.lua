@@ -9,6 +9,13 @@ local fn = vim.fn
 ---@field buffer integer
 ---@field config table
 
+---@class Node
+---@field type "leaf"|"row"|"col"
+---@field parent Node
+---@field index integer
+---@field winid integer|nil
+---@field children Node[]
+
 local M = {
   ---@type Scratchpad[]
   pads = {},
@@ -32,6 +39,7 @@ comp_float:put({ "h", "height" }, {})
 comp_float:put({ "c", "col" }, {})
 comp_float:put({ "r", "row" }, {})
 comp_float:put({ "z", "zindex" }, {})
+comp_float:put({ "toggle" })
 
 ---@param winid integer
 ---@param config table
@@ -46,6 +54,7 @@ function M.is_float(winid)
 end
 
 ---@class WinInfo
+---@field winid integer
 ---@field x integer
 ---@field y integer
 ---@field width integer
@@ -53,22 +62,25 @@ end
 ---@field anchor "NW"|"NE"|"SW"|"SE"
 ---@field external boolean
 ---@field focusable boolean
+---@field floating boolean
 ---@field relative "editor"|"win"|"cursor"
 ---@field zindex integer
 
 ---@param winid integer
 ---@return WinInfo?
-function M.win_get_info(winid)
+function M.win_info(winid)
   local c = api.nvim_win_get_config(winid)
 
   return {
-    x = c.col[false] --[[@as integer ]],
-    y = c.row[false] --[[@as integer ]],
+    winid = winid == 0 and api.nvim_get_current_win() or winid,
+    x = c.col and c.col[false] --[[@as integer ]],
+    y = c.row and c.row[false] --[[@as integer ]],
     width = c.width,
     height = c.height,
     anchor = c.anchor,
     external = c.external,
     focusable = c.focusable,
+    floating = c.relative ~= "",
     relative = c.relative,
     zindex = c.zindex,
   }
@@ -85,7 +97,7 @@ end
 ---@param x integer
 ---@param y integer
 function M.float_mod_pos(winid, x, y)
-  local info = M.win_get_info(winid)
+  local info = M.win_info(winid)
 
   if info then
     M.float_set_pos(winid, info.x + x, info.y + y)
@@ -122,6 +134,74 @@ local function win_safe_close(winid)
         end
     end)
   end
+end
+
+---@param layout? table[] # A layout structured like the output of |winlayout()|. (default: layout in the current tab page)
+---@return Node
+function M.get_layout_tree(layout)
+  layout = layout or vim.fn.winlayout()
+
+  local function recurse(parent)
+    ---@type Node
+    local node = { type = parent[1], children = {} }
+
+    if node.type == "leaf" then
+      node.winid = parent[2]
+    else
+      for i, child in ipairs(parent[2]) do
+        local child_node = recurse(child)
+        child_node.index = i
+        child_node.parent = node
+        node.children[#node.children + 1] = child_node
+      end
+    end
+
+    return node
+  end
+
+  return recurse(layout)
+end
+
+---@param node Node
+---@return Node
+function M.get_first_leaf(node)
+  local cur = node
+  while cur.type ~= "leaf" do
+    cur = cur.children[1]
+  end
+  return cur
+end
+
+---@param node Node
+---@return Node
+function M.get_last_leaf(node)
+  local cur = node
+  while cur.type ~= "leaf" do
+    cur = cur.children[#cur.children]
+  end
+  return cur
+end
+
+---@param tree Node
+---@param winid integer
+---@return Node?
+function M.find_leaf(tree, winid)
+  ---@param node Node
+  ---@return Node?
+  local function recurse(node)
+    if node.type == "leaf" and node.winid == winid then
+      return node
+    else
+      for _, child in ipairs(node) do
+        local target = recurse(child)
+        if target then
+          return target
+        end
+      end
+    end
+  end
+
+  return recurse(tree)
 end
 
 function M.indexof_pad(winid)
@@ -176,7 +256,7 @@ function M.prev_pad()
   return (M.cur_pad - 2) % #M.pads + 1
 end
 
-M.sub_commands = {
+M.subcmds = {
   Scratchpad = {
     {
       --- Move a window into / out of the scratchpad.
@@ -223,7 +303,7 @@ M.sub_commands = {
   },
 }
 
-for _, subcmds in pairs(M.sub_commands) do
+for _, subcmds in pairs(M.subcmds) do
   for _, subcmd in ipairs(subcmds) do
     subcmds[subcmd.name] = subcmd.command
   end
@@ -242,7 +322,7 @@ M.completers = {
     if ctx.argidx <= 2 then
       return vim.tbl_filter(function(v)
         return type(v) ~= "number"
-      end, vim.tbl_keys(M.sub_commands.Scratchpad))
+      end, vim.tbl_keys(M.subcmds.Scratchpad))
     end
   end,
 }
