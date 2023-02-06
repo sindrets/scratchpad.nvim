@@ -146,6 +146,7 @@ api.nvim_create_autocmd("WinLeave", {
       sp.pads[i] = vim.tbl_extend("force", sp.pads[i], {
         buffer = api.nvim_win_get_buf(winid),
         config = api.nvim_win_get_config(winid),
+        state = sp.save_win(winid),
       })
     end
   end,

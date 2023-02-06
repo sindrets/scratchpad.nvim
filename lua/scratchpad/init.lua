@@ -8,6 +8,7 @@ local fn = vim.fn
 ---@field winid integer
 ---@field buffer integer
 ---@field config table
+---@field state WinState
 
 ---@class Node
 ---@field type "leaf"|"row"|"col"
@@ -15,6 +16,21 @@ local fn = vim.fn
 ---@field index integer
 ---@field winid integer|nil
 ---@field children Node[]
+
+---@class VimOption
+---@field allows_duplicates boolean
+---@field commalist boolean
+---@field default boolean
+---@field flaglist boolean
+---@field global_local boolean
+---@field last_set_chan integer
+---@field last_set_linenr integer
+---@field last_set_sid integer
+---@field name string
+---@field shortname string
+---@field scope "global"|"win"|"buf"
+---@field type string
+---@field was_set boolean
 
 local M = {
   ---@type Scratchpad[]
@@ -33,6 +49,18 @@ M.default_float_config = {
   border = "single",
 }
 
+---@type table<string, VimOption>
+M.win_option_info = {}
+
+do
+  -- Find all window options
+  for name, spec in pairs(api.nvim_get_all_options_info()) do
+    if spec.scope == "win" then
+      M.win_option_info[name] = spec
+    end
+  end
+end
+
 local comp_float = arg_parser.FlagValueMap() --[[@as FlagValueMap ]]
 comp_float:put({ "w", "width" }, {})
 comp_float:put({ "h", "height" }, {})
@@ -44,7 +72,11 @@ comp_float:put({ "toggle" })
 ---@param winid integer
 ---@param config table
 function M.win_update_config(winid, config)
+  local save_eventignore = vim.o.eventignore
+  ---@diagnostic disable-next-line: undefined-field
+  vim.opt.eventignore:append({ "WinLeave", "WinEnter", "WinClosed", "WinScrolled" })
   api.nvim_win_set_config(winid, vim.tbl_extend("force", api.nvim_win_get_config(winid), config))
+  vim.opt.eventignore = save_eventignore
 end
 
 ---@param winid integer
@@ -84,6 +116,44 @@ function M.win_info(winid)
     relative = c.relative,
     zindex = c.zindex,
   }
+end
+
+---@class WinState
+---@field view table
+---@field win_opts table<string, any>
+
+---@param winid integer
+---@return WinState
+function M.save_win(winid)
+  local ret
+
+  api.nvim_win_call(winid, function()
+    ret = {
+      view = vim.fn.winsaveview(),
+      win_opts = {},
+    }
+
+    for name, _ in pairs(M.win_option_info) do
+      ret.win_opts[name] = api.nvim_get_option_value(name, {
+        scope = "local",
+        win = winid,
+      })
+    end
+  end)
+
+  return ret
+end
+
+---@param winid integer
+---@param state WinState
+function M.restore_win(winid, state)
+  for name, value in pairs(state.win_opts) do
+    vim.wo[winid][name] = value
+  end
+
+  api.nvim_win_call(winid, function()
+    vim.fn.winrestview(state.view)
+  end)
 end
 
 ---@param winid integer
@@ -236,6 +306,7 @@ function M.show_pad(pad)
       api.nvim_set_current_win(pad.winid)
       return
     end
+    -- Close the pad open in another tab
     api.nvim_win_close(pad.winid, false)
   end
 
@@ -243,6 +314,10 @@ function M.show_pad(pad)
 
   if winid > 0 then
     pad.winid = winid
+  end
+
+  if pad.state then
+    M.restore_win(pad.winid, pad.state)
   end
 end
 
@@ -268,8 +343,10 @@ M.subcmds = {
         if not M.is_float(winid) then
           vim.cmd("Float")
           M.cur_pad = M.cur_pad + 1
-          M.add_pad(api.nvim_get_current_win())
+          local pad_winid = api.nvim_get_current_win()
+          M.add_pad(pad_winid)
           win_safe_close(winid)
+          api.nvim_win_close(pad_winid, false)
         else
           local i = M.indexof_pad(winid)
 
